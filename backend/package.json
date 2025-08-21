@@ -5,11 +5,11 @@
   "scripts": {
     "dev": "nodemon --exec ts-node --transpile-only src/index.ts",
     "tunnel": "npx localtunnel --port 3000 --subdomain ce395backend",
-    "back":"cloudflared tunnel --url http://localhost:3000",
+    "back": "cloudflared tunnel --url http://localhost:3000",
     "start-all": "concurrently \"npm run dev\" \"npm run tunnel\"",
     "migrate": "npx prisma migrate dev",
     "build": "tsc",
-    "start": "node dist/index.js",   
+    "start": "node dist/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -25,11 +25,14 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "helmet": "^8.1.0",
+    "openai": "^5.13.1",
     "pino": "^9.6.0",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "@types/express": "^5.0.1",
+    "@types/body-parser": "^1.19.6",
+    "@types/express": "^4.17.23",
+    "@types/express-serve-static-core": "^4.19.6",
     "@types/node": "^22.13.13",
     "concurrently": "^9.1.2",
     "localtunnel": "^2.0.2",
