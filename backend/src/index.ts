@@ -294,7 +294,7 @@ setInterval(async () => {
 // ===== Root route
 app.get("/", async (req: Request, res: Response) => {
   try {
-    const sensor = await axios.get("http://localhost:3000/latest");
+    const sensor = await axios.get("https://ce395backend.onrender.com/latest");
     const { light, temp, humidity } = sensor.data;
     const lightStatus = getLightStatus(light);
     const tempStatus = getTempStatus(temp);
@@ -304,7 +304,15 @@ app.get("/", async (req: Request, res: Response) => {
 🌡 อุณหภูมิ: ${temp} °C ( ${tempStatus} ) <br>
 💧 ความชื้น: ${humidity} % ( ${humidityStatus} )`);
   } catch {
-    res.send(`✅ Hello World!`);
+    const sensor = await axios.get("https://ce395backend.onrender.com/latest");
+    const { light, temp, humidity } = sensor.data;
+    const lightStatus = getLightStatus(light);
+    const tempStatus = getTempStatus(temp);
+    const humidityStatus = getHumidityStatus(humidity);
+    res.send(`✅ Hello World!<br>
+💡 ค่าแสง: ${light} lux ( ${lightStatus} ) <br>
+🌡 อุณหภูมิ: ${temp} °C ( ${tempStatus} ) <br>
+💧 ความชื้น: ${humidity} % ( ${humidityStatus} )`);
   }
 });
 
