@@ -13,7 +13,8 @@ dayjs.extend(timezone);
 
 const app = express();
 const prisma = new PrismaClient();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;   // <— บังคับให้เป็น number
+const HOST = '0.0.0.0';
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
 app.use(cors());
@@ -308,6 +309,7 @@ app.get("/", async (req: Request, res: Response) => {
 });
 
 // ===== Start Server
-app.listen(PORT, () => {
-  console.log(`✅ Server is running on http://localhost:${PORT}`);
+
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
 });

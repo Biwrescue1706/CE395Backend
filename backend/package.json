@@ -8,6 +8,8 @@
     "back":"cloudflared tunnel --url http://localhost:3000",
     "start-all": "concurrently \"npm run dev\" \"npm run tunnel\"",
     "migrate": "npx prisma migrate dev",
+    "build": "tsc",
+    "start": "tsx src/index.ts",   
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
