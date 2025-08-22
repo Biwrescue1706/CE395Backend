@@ -2,7 +2,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import express, { Request, Response, RequestHandler } from "express";
+import express, { Request, Response } from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import axios from "axios";
@@ -79,7 +79,7 @@ async function askOpenAI(prompt: string): Promise<string> {
     input: prompt,
     store: false,
   });
-  // @ts-ignore
+  // @ts-ignore: SDK field
   return resp.output_text ?? "ไม่มีข้อความตอบกลับ";
 }
 
@@ -131,7 +131,7 @@ async function replyToUserAndDelete(
 }
 
 // ===== Webhook =====
-const webhook: RequestHandler = async (req, res) => {
+app.post("/webhook", async (req: Request, res: Response) => {
   const events = (req.body?.events as any[]) || [];
 
   for (const event of events) {
@@ -140,22 +140,27 @@ const webhook: RequestHandler = async (req, res) => {
     const messageType = event?.message?.type as string | undefined;
     const text = ((event?.message?.text as string) || "").trim();
 
+    // ถ้าไม่มี userId หรือ replyToken ข้าม
     if (!userId || !replyToken) continue;
 
+    // ทำให้ TS ชัดว่าเป็น string แล้ว
+    const uid = userId as string;
+    const token = replyToken as string;
+
     // upsert user
-    const existingUser = await prisma.user.findUnique({ where: { userId } });
-    if (!existingUser) await prisma.user.create({ data: { userId } });
+    const existingUser = await prisma.user.findUnique({ where: { userId: uid } });
+    if (!existingUser) await prisma.user.create({ data: { userId: uid } });
 
     // dedupe replyToken
-    const exists = await prisma.pendingReply.findUnique({ where: { replyToken } });
+    const exists = await prisma.pendingReply.findUnique({ where: { replyToken: token } });
     if (exists) continue;
 
     const created = await prisma.pendingReply.create({
-      data: { replyToken, userId, messageType, text },
+      data: { replyToken: token, userId: uid, messageType, text },
     });
 
     if (!lastSensorData) {
-      await replyToUserAndDelete(created.id, replyToken, "❌ ยังไม่มีข้อมูลจากเซ็นเซอร์");
+      await replyToUserAndDelete(created.id, token, "❌ ยังไม่มีข้อมูลจากเซ็นเซอร์");
       continue;
     }
 
@@ -174,50 +179,52 @@ const webhook: RequestHandler = async (req, res) => {
       replyText += `\n🤖 AI: ${cleanAIResponse(ai)}`;
     }
 
-    await replyToUserAndDelete(created.id, replyToken, replyText);
+    await replyToUserAndDelete(created.id, token, replyText);
   }
 
   res.sendStatus(200);
-};
-app.post("/webhook", webhook);
+});
 
 // ===== Sensor Data =====
 app.post("/sensor-data", (req: Request, res: Response) => {
-  const { light, temp, humidity } = req.body;
+  const { light, temp, humidity } = req.body as {
+    light?: number | string;
+    temp?: number | string;
+    humidity?: number | string;
+  };
+
   if ([light, temp, humidity].every((v) => v !== undefined)) {
     lastSensorData = {
       light: Number(light),
       temp: Number(temp),
       humidity: Number(humidity),
     };
-    res.json({ message: "✅ รับข้อมูลแล้ว" });
-    return;
+    return res.json({ message: "✅ รับข้อมูลแล้ว" });
   }
-  res.status(400).json({ message: "❌ ข้อมูลไม่ครบ" });
+
+  return res.status(400).json({ message: "❌ ข้อมูลไม่ครบ" });
 });
 
 // ===== Latest Sensor =====
-app.get("/latest", (_req: Request, res: Response) => {
+app.get("/latest", (req: Request, res: Response) => {
   if (!lastSensorData) {
-    res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
-    return;
+    return res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
   }
-  res.json(lastSensorData);
+  return res.json(lastSensorData);
 });
 
 // ===== Generic OpenAI endpoint =====
 app.post("/ask", async (req: Request, res: Response) => {
   try {
-    const { prompt } = req.body;
+    const { prompt } = req.body as { prompt?: string };
     if (!prompt) {
-      res.status(400).json({ error: "missing prompt" });
-      return;
+      return res.status(400).json({ error: "missing prompt" });
     }
     const answer = await askOpenAI(prompt);
-    res.json({ answer });
+    return res.json({ answer });
   } catch (err: any) {
     console.error("OpenAI error:", err?.response?.data || err?.message);
-    res.status(500).json({ error: "OpenAI request failed" });
+    return res.status(500).json({ error: "OpenAI request failed" });
   }
 });
 
@@ -225,21 +232,19 @@ app.post("/ask", async (req: Request, res: Response) => {
 app.post("/ask-ai", async (req: Request, res: Response) => {
   try {
     if (!lastSensorData) {
-      res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
-      return;
+      return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
     }
-    const { question } = req.body;
+    const { question } = req.body as { question?: string };
     if (!question) {
-      res.status(400).json({ error: "❌ missing question" });
-      return;
+      return res.status(400).json({ error: "❌ missing question" });
     }
 
     const { light, temp, humidity } = lastSensorData;
     const answer = await answerWithSensorAI(question, light, temp, humidity);
-    res.json({ answer: cleanAIResponse(answer) });
+    return res.json({ answer: cleanAIResponse(answer) });
   } catch (err: any) {
     console.error("ask-ai error:", err?.response?.data || err?.message);
-    res.status(500).json({ error: "ask-ai failed" });
+    return res.status(500).json({ error: "ask-ai failed" });
   }
 });
 
@@ -287,26 +292,35 @@ setInterval(async () => {
 }, 5 * 60 * 1000);
 
 // ===== Health & Root =====
-app.get("/healthz", (req, res) => res.status(200).send("ok"));
+app.get("/healthz", (req: Request, res: Response) => res.status(200).send("ok"));
 
-// ===== Root route
+// ===== Root route (ส่งครั้งเดียว)
 app.get("/", async (req: Request, res: Response) => {
+  let html = `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`;
+
   try {
     const sensor = await axios.get("https://ce395backend.onrender.com/latest");
     const { light, temp, humidity } = sensor.data;
+
     const lightStatus = getLightStatus(light);
     const tempStatus = getTempStatus(temp);
     const humidityStatus = getHumidityStatus(humidity);
-    res.send(
-      `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
-💡 ค่าแสง: ${light} lux ( ${lightStatus} ) <br>
-🌡 อุณหภูมิ: ${temp} °C ( ${tempStatus} ) <br>
-💧 ความชื้น: ${humidity} % ( ${humidityStatus} )`);
 
+    html = `
+      ✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
+      💡 ค่าแสง: ${light} lux (${lightStatus}) <br>
+      🌡️ อุณหภูมิ: ${temp} °C (${tempStatus}) <br>
+      💧 ความชื้น: ${humidity} % (${humidityStatus})
+    `;
   } catch {
-    res.send(`✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`);
+    if (lastSensorData) {
+      html = `
+        ✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
+      `;
+    }
   }
 
+  return res.send(html);
 });
 
 // ===== Start & graceful shutdown =====
