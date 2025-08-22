@@ -1,15 +1,14 @@
-// src/index.ts
-import dotenv from "dotenv";
-dotenv.config();
+// src/index.js
+require("dotenv").config();
 
-import express, { Request, Response } from "express";
-import cors from "cors";
-import axios from "axios";
-import dayjs from "dayjs";
-import utc from "dayjs/plugin/utc";
-import timezone from "dayjs/plugin/timezone";
-import { PrismaClient } from "@prisma/client";
-import OpenAI from "openai";
+const express = require("express");
+const cors = require("cors");
+const axios = require("axios");
+const dayjs = require("dayjs");
+const utc = require("dayjs/plugin/utc");
+const timezone = require("dayjs/plugin/timezone");
+const { PrismaClient } = require("@prisma/client");
+const OpenAI = require("openai");
 
 // ----- Init libs -----
 dayjs.extend(utc);
@@ -26,20 +25,20 @@ const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ?? "" });
 
 app.use(cors());
-app.use(express.json()); // ← ใช้ของ Express แทน body-parser
+app.use(express.json()); // body-parser ไม่จำเป็น
 
 // ===== In-memory sensor cache =====
-let lastSensorData: { light: number; temp: number; humidity: number } | null = null;
+let lastSensorData = null; // { light, temp, humidity }
 
 // ===== Utils =====
-function cleanAIResponse(text: string): string {
-  return text
+function cleanAIResponse(text) {
+  return String(text)
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/<[^>]+>/g, "")
     .trim();
 }
 
-function getLightStatus(light: number): string {
+function getLightStatus(light) {
   if (light > 50000) return "แดดจ้า ☀️";
   if (light > 10000) return "กลางแจ้ง มีเมฆ หรือแดดอ่อน 🌤";
   if (light > 5000) return "ฟ้าครึ้ม 🌥";
@@ -50,7 +49,7 @@ function getLightStatus(light: number): string {
   return "มืดมากๆ 🕳️";
 }
 
-function getTempStatus(temp: number): string {
+function getTempStatus(temp) {
   if (temp > 35) return "อุณหภูมิร้อนมาก ⚠️";
   if (temp >= 30) return "อุณหภูมิร้อน 🔥";
   if (temp >= 25) return "อุณหภูมิอุ่นๆ 🌞";
@@ -58,7 +57,7 @@ function getTempStatus(temp: number): string {
   return "อุณหูมิเย็น ❄️";
 }
 
-function getHumidityStatus(humidity: number): string {
+function getHumidityStatus(humidity) {
   if (humidity > 85) return "ชื้นมาก อากาศอึดอัด 🌧️";
   if (humidity > 70) return "อากาศชื้น เหนียวตัว 💦";
   if (humidity > 60) return "เริ่มชื้น 🌫️";
@@ -69,25 +68,17 @@ function getHumidityStatus(humidity: number): string {
 }
 
 // ===== AI Helpers =====
-async function askOpenAI(prompt: string): Promise<string> {
-  if (!process.env.OPENAI_API_KEY) {
-    return "❌ ยังไม่ได้ตั้งค่า OPENAI_API_KEY";
-  }
+async function askOpenAI(prompt) {
+  if (!process.env.OPENAI_API_KEY) return "❌ ยังไม่ได้ตั้งค่า OPENAI_API_KEY";
   const resp = await openai.responses.create({
     model: "gpt-4o-mini",
     input: prompt,
     store: false,
   });
-  // @ts-ignore: SDK field
   return resp.output_text ?? "ไม่มีข้อความตอบกลับ";
 }
 
-async function answerWithSensorAI(
-  question: string,
-  light: number,
-  temp: number,
-  humidity: number
-) {
+async function answerWithSensorAI(question, light, temp, humidity) {
   const prompt = `
 ข้อมูลเซ็นเซอร์:
 - ค่าแสง: ${light} lux
@@ -100,57 +91,41 @@ async function answerWithSensorAI(
 }
 
 // ===== LINE Reply =====
-async function replyToUserAndDelete(
-  id: number,
-  replyToken: string,
-  message: string
-) {
+async function replyToUserAndDelete(id, replyToken, message) {
   try {
     const text =
-      message.length > 4000
-        ? message.slice(0, 4000) + "\n...(ตัดข้อความ)"
-        : message;
+      message.length > 4000 ? message.slice(0, 4000) + "\n...(ตัดข้อความ)" : message;
     if (!LINE_ACCESS_TOKEN) throw new Error("LINE_ACCESS_TOKEN is missing");
 
     await axios.post(
       "https://api.line.me/v2/bot/message/reply",
       { replyToken, messages: [{ type: "text", text }] },
-      {
-        headers: {
-          Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
+      { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}`, "Content-Type": "application/json" } }
     );
     await prisma.pendingReply.delete({ where: { id } });
     console.log("✅ ส่งข้อความกลับ LINE แล้ว");
-  } catch (err: any) {
+  } catch (err) {
     console.error("❌ LINE reply error:", err?.response?.data || err?.message);
   }
 }
 
 // ===== Webhook =====
-app.post("/webhook", async (req: Request, res: Response) => {
-  const events = (req.body?.events as any[]) || [];
+app.post("/webhook", async (req, res) => {
+  const events = req.body?.events || [];
 
   for (const event of events) {
-    const userId = event?.source?.userId as string | undefined;
-    const replyToken = event?.replyToken as string | undefined;
-    const messageType = event?.message?.type as string | undefined;
-    const text = ((event?.message?.text as string) || "").trim();
+    const userId = event?.source?.userId;
+    const replyToken = event?.replyToken;
+    const messageType = event?.message?.type ?? "text";
+    const text = (event?.message?.text || "").trim();
 
-    // ถ้าไม่มี userId หรือ replyToken ข้าม
     if (!userId || !replyToken) continue;
+    const uid = userId;
+    const token = replyToken;
 
-    // ทำให้ TS ชัดว่าเป็น string แล้ว
-    const uid = userId as string;
-    const token = replyToken as string;
-
-    // upsert user
     const existingUser = await prisma.user.findUnique({ where: { userId: uid } });
     if (!existingUser) await prisma.user.create({ data: { userId: uid } });
 
-    // dedupe replyToken
     const exists = await prisma.pendingReply.findUnique({ where: { replyToken: token } });
     if (exists) continue;
 
@@ -164,34 +139,27 @@ app.post("/webhook", async (req: Request, res: Response) => {
     }
 
     const { light, temp, humidity } = lastSensorData;
-    const lightStatus = getLightStatus(light);
-    const tempStatus = getTempStatus(temp);
-    const humidityStatus = getHumidityStatus(humidity);
-
-    let replyText = `📊 สภาพอากาศล่าสุด :
-💡 ค่าแสง: ${light} lux (${lightStatus})
-🌡️ อุณหภูมิ: ${temp} °C (${tempStatus})
-💧 ความชื้น: ${humidity} % (${humidityStatus})`;
+    const replyPieces = [
+      "📊 สภาพอากาศล่าสุด :",
+      `💡 ค่าแสง: ${light} lux (${getLightStatus(light)})`,
+      `🌡️ อุณหภูมิ: ${temp} °C (${getTempStatus(temp)})`,
+      `💧 ความชื้น: ${humidity} % (${getHumidityStatus(humidity)})`,
+    ];
 
     if (messageType === "text") {
       const ai = await answerWithSensorAI(text, light, temp, humidity);
-      replyText += `\n🤖 AI: ${cleanAIResponse(ai)}`;
+      replyPieces.push(`🤖 AI: ${cleanAIResponse(ai)}`);
     }
 
-    await replyToUserAndDelete(created.id, token, replyText);
+    await replyToUserAndDelete(created.id, token, replyPieces.join("\n"));
   }
 
   res.sendStatus(200);
 });
 
 // ===== Sensor Data =====
-app.post("/sensor-data", (req: Request, res: Response) => {
-  const { light, temp, humidity } = req.body as {
-    light?: number | string;
-    temp?: number | string;
-    humidity?: number | string;
-  };
-
+app.post("/sensor-data", (req, res) => {
+  const { light, temp, humidity } = req.body || {};
   if ([light, temp, humidity].every((v) => v !== undefined)) {
     lastSensorData = {
       light: Number(light),
@@ -200,48 +168,39 @@ app.post("/sensor-data", (req: Request, res: Response) => {
     };
     return res.json({ message: "✅ รับข้อมูลแล้ว" });
   }
-
   return res.status(400).json({ message: "❌ ข้อมูลไม่ครบ" });
 });
 
 // ===== Latest Sensor =====
-app.get("/latest", (req: Request, res: Response) => {
-  if (!lastSensorData) {
-    return res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
-  }
+app.get("/latest", (req, res) => {
+  if (!lastSensorData) return res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
   return res.json(lastSensorData);
 });
 
 // ===== Generic OpenAI endpoint =====
-app.post("/ask", async (req: Request, res: Response) => {
+app.post("/ask", async (req, res) => {
   try {
-    const { prompt } = req.body as { prompt?: string };
-    if (!prompt) {
-      return res.status(400).json({ error: "missing prompt" });
-    }
+    const { prompt } = req.body || {};
+    if (!prompt) return res.status(400).json({ error: "missing prompt" });
     const answer = await askOpenAI(prompt);
     return res.json({ answer });
-  } catch (err: any) {
+  } catch (err) {
     console.error("OpenAI error:", err?.response?.data || err?.message);
     return res.status(500).json({ error: "OpenAI request failed" });
   }
 });
 
 // ===== Ask AI with sensor context =====
-app.post("/ask-ai", async (req: Request, res: Response) => {
+app.post("/ask-ai", async (req, res) => {
   try {
-    if (!lastSensorData) {
-      return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
-    }
-    const { question } = req.body as { question?: string };
-    if (!question) {
-      return res.status(400).json({ error: "❌ missing question" });
-    }
+    if (!lastSensorData) return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
+    const { question } = req.body || {};
+    if (!question) return res.status(400).json({ error: "❌ missing question" });
 
     const { light, temp, humidity } = lastSensorData;
     const answer = await answerWithSensorAI(question, light, temp, humidity);
     return res.json({ answer: cleanAIResponse(answer) });
-  } catch (err: any) {
+  } catch (err) {
     console.error("ask-ai error:", err?.response?.data || err?.message);
     return res.status(500).json({ error: "ask-ai failed" });
   }
@@ -258,10 +217,7 @@ setInterval(async () => {
     const buddhistYear = now.year() + 543;
 
     const thaiDays = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
-    const thaiMonths = [
-      "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
-      "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
-    ];
+    const thaiMonths = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
 
     const thaiTime = `วัน${thaiDays[now.day()]} ที่ ${now.date()} ${thaiMonths[now.month()]} พ.ศ.${buddhistYear} เวลา ${now.format("HH:mm")} น.`;
 
@@ -291,37 +247,26 @@ setInterval(async () => {
 }, 5 * 60 * 1000);
 
 // ===== Health & Root =====
-app.get("/healthz", (req: Request, res: Response) => res.status(200).send("ok"));
+app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
 // ===== Root route (ส่งครั้งเดียว)
-app.get("/", async (req: Request, res: Response) => {
+app.get("/", async (req, res) => {
   let html = `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`;
 
   try {
-    // เรียกข้อมูลล่าสุดจาก service ภายนอก (แก้ URL ให้ตรงกับของคุณ)
     const sensor = await axios.get("https://ce395backend-1.onrender.com/latest");
     const { light, temp, humidity } = sensor.data;
 
-    const lightStatus = getLightStatus(light);
-    const tempStatus = getTempStatus(temp);
-    const humidityStatus = getHumidityStatus(humidity);
-
     html = `
       ✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
-      💡 ค่าแสง: ${light} lux (${lightStatus}) <br>
-      🌡️ อุณหภูมิ: ${temp} °C (${tempStatus}) <br>
-      💧 ความชื้น: ${humidity} % (${humidityStatus})
+      💡 ค่าแสง: ${light} lux (${getLightStatus(light)}) <br>
+      🌡️ อุณหภูมิ: ${temp} °C (${getTempStatus(temp)}) <br>
+      💧 ความชื้น: ${humidity} % (${getHumidityStatus(humidity)})
     `;
   } catch {
-    // ถ้าเรียกภายนอกไม่ได้ ลองแสดงจาก cache ในหน่วยความจำถ้ามี
     if (lastSensorData) {
-      const { light, temp, humidity } = lastSensorData;
       html = `
         ✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
-        (แสดงจากข้อมูลล่าสุดในหน่วยความจำ) <br>
-        💡 ค่าแสง: ${light} lux (${getLightStatus(light)}) <br>
-        🌡️ อุณหภูมิ: ${temp} °C (${getTempStatus(temp)}) <br>
-        💧 ความชื้น: ${humidity} % (${getHumidityStatus(humidity)})
       `;
     }
   }
@@ -333,12 +278,5 @@ app.get("/", async (req: Request, res: Response) => {
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT} (env: ${NODE_ENV})`);
 });
-
-process.on("SIGTERM", async () => {
-  await prisma.$disconnect();
-  server.close();
-});
-process.on("SIGINT", async () => {
-  await prisma.$disconnect();
-  server.close();
-});
+process.on("SIGTERM", async () => { await prisma.$disconnect(); server.close(); });
+process.on("SIGINT", async () => { await prisma.$disconnect(); server.close(); });
