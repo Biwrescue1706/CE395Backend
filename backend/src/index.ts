@@ -24,8 +24,7 @@ const NODE_ENV = process.env.NODE_ENV || "development";
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
 // OpenAI client
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ?? "" });
 app.use(cors());
 app.use(bodyParser.json());
 
@@ -299,7 +298,7 @@ app.get("/", async (req: Request, res: Response) => {
   let html = `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`;
 
   try {
-    const sensor = await axios.get("https://ce395backend.onrender.com/latest");
+    const sensor = await axios.get("https://ce395backend-1.onrender.com/latest");
     const { light, temp, humidity } = sensor.data;
 
     const lightStatus = getLightStatus(light);
