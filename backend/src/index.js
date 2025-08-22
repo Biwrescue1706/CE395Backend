@@ -8,7 +8,7 @@ const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
 const { PrismaClient } = require("@prisma/client");
 const axios = require("axios");
-const OpenAI = require("openai");     
+const OpenAI = require("openai");
 
 // ----- Init libs -----
 dayjs.extend(utc);
@@ -65,15 +65,36 @@ function getHumidityStatus(humidity) {
   return "อากาศแห้งมาก 🏜️";
 }
 
-// ===== AI Helpers =====
-async function askOpenAI(prompt, light, temp, humidity) {
+// ===== AI Helpers (robust) =====
+async function askOpenAI(prompt) {
   if (!process.env.OPENAI_API_KEY) return "❌ ยังไม่ได้ตั้งค่า OPENAI_API_KEY";
-  const resp = await openai.responses.create({
-    model: "gpt-4o-mini",
-    input: prompt,
-    store: false,
-  });
-  return resp.output_text ?? "ไม่มีข้อความตอบกลับ";
+  // ลองใช้ Responses API ก่อน
+  try {
+    if (typeof openai.responses?.create === "function") {
+      const resp = await openai.responses.create({
+        model: "gpt-4o-mini",
+        input: prompt,
+        store: false,
+      });
+      return resp.output_text ?? "ไม่มีข้อความตอบกลับ";
+    }
+    throw new Error("Responses API not available");
+  } catch (e1) {
+    // ถ้าใช้ responses ไม่ได้ ให้ fallback ไป chat.completions (รองรับ lib รุ่นเก่า)
+    try {
+      if (typeof openai.chat?.completions?.create === "function") {
+        const resp = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: prompt }],
+        });
+        return resp.choices?.[0]?.message?.content ?? "ไม่มีข้อความตอบกลับ";
+      }
+      throw e1;
+    } catch (e2) {
+      // ส่งต่อ error ให้ caller จัดการ fallback ต่อ
+      throw e2;
+    }
+  }
 }
 
 async function answerWithSensorAI(question, light, temp, humidity) {
@@ -87,6 +108,7 @@ async function answerWithSensorAI(question, light, temp, humidity) {
   `.trim();
   return askOpenAI(prompt);
 }
+
 
 // ===== LINE Reply =====
 async function replyToUser(replyToken, message) {
@@ -220,19 +242,40 @@ app.get("/latest", (req, res) => {
   else res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
 });
 
-// ===== Ask AI with sensor context =====
 app.post("/ask-ai", async (req, res) => {
   try {
-    if (!lastSensorData) return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
-    const { question } = req.body || {};
-    if (!question) return res.status(400).json({ error: "❌ missing question" });
+    const { question, light: bLight, temp: bTemp, humidity: bHum } = req.body || {};
+    if (!question || typeof question !== "string") {
+      return res.status(400).json({ error: "❌ missing question" });
+    }
 
-    const { light, temp, humidity } = lastSensorData;
-    const answer = await answerWithSensorAI(question, light, temp, humidity);
-    return res.json({ answer: cleanAIResponse(answer) });
+    // 1) พยายามใช้ค่าจาก body ก่อน ถ้าไม่ครบค่อย fallback ไป lastSensorData
+    let light, temp, humidity;
+    if ([bLight, bTemp, bHum].every(v => typeof v === "number" && !Number.isNaN(v))) {
+      light = bLight; temp = bTemp; humidity = bHum;
+    } else if (lastSensorData) {
+      ({ light, temp, humidity } = lastSensorData);
+    } else {
+      return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์ (ไม่พบทั้งใน body และ server)" });
+    }
+
+    // 2) เรียก AI ถ้าล้มเหลว ให้ตอบ fallback rule-based แทน
+    try {
+      const ai = await answerWithSensorAI(question, light, temp, humidity);
+      return res.json({ answer: cleanAIResponse(ai), meta: { source: "openai" } });
+    } catch (aiErr) {
+      console.error("OpenAI error:", aiErr?.response?.data || aiErr?.message || aiErr);
+      const fallback =
+        `สรุปจากค่าปัจจุบัน\n` +
+        `• แสง: ${light} lux (${getLightStatus(light)})\n` +
+        `• อุณหภูมิ: ${temp} °C (${getTempStatus(temp)})\n` +
+        `• ความชื้น: ${humidity} % (${getHumidityStatus(humidity)})\n` +
+        `คำแนะนำเบื้องต้น: หากอากาศร้อน/ชื้นมากให้ดื่มน้ำและพักในที่อากาศถ่ายเท`;
+      return res.json({ answer: fallback, meta: { source: "fallback" } });
+    }
   } catch (err) {
-    console.error("ask-ai error:", err?.response?.data || err?.message);
-    return res.status(500).json({ error: "ask-ai failed" });
+    console.error("ask-ai fatal:", err);
+    return res.status(500).json({ error: "ask-ai failed", detail: String(err?.message || err) });
   }
 });
 
@@ -247,7 +290,7 @@ setInterval(async () => {
     const buddhistYear = now.year() + 543;
 
     const thaiDays = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
-    const thaiMonths = ["มกราคม","กุมภาพันธ์","มีนาคม","เมษายน","พฤษภาคม","มิถุนายน","กรกฎาคม","สิงหาคม","กันยายน","ตุลาคม","พฤศจิกายน","ธันวาคม"];
+    const thaiMonths = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
 
     const thaiTime = `วัน${thaiDays[now.day()]} ที่ ${now.date()} ${thaiMonths[now.month()]} พ.ศ.${buddhistYear} เวลา ${now.format("HH:mm")} น.`;
 
