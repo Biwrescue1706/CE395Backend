@@ -287,7 +287,7 @@ setInterval(async () => {
 }, 5 * 60 * 1000);
 
 // ===== Health & Root =====
-app.get("/healthz", (_req, res) => res.status(200).send("ok"));
+app.get("/healthz", (req, res) => res.status(200).send("ok"));
 
 // ===== Root route
 app.get("/", async (req: Request, res: Response) => {
@@ -305,9 +305,6 @@ app.get("/", async (req: Request, res: Response) => {
 
   } catch {
     res.send(`✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`);
-  }
-  if (!lastSensorData) {
-    return res.send("✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ.");
   }
 
 });
