@@ -13,7 +13,7 @@ const OpenAI = require("openai");
 // ----- Init libs -----
 dayjs.extend(utc);
 dayjs.extend(timezone);
-axios.default.timeout = 15000;
+axios.defaults.timeout = 15000; // ✅ fixed (defaults)
 
 const app = express();
 const prisma = new PrismaClient();
@@ -23,10 +23,32 @@ const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
 
-app.use(cors());
-app.use(express.json());
+// ===== Rate-limit & cache config =====
+const { setTimeout: delay } = require("node:timers/promises");
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_RPM = Number(process.env.OPENAI_RPM || 2);            // ต่ำกว่าลิมิตจริงกันพลาด
+const OPENAI_MAX_RETRIES = Number(process.env.OPENAI_MAX_RETRIES || 3);
+const ENABLE_AUTO_REPORT = process.env.ENABLE_AUTO_REPORT === "true";
 
-let lastSensorData = null;
+let chain = Promise.resolve();                                      // serialize ทีละคำขอ
+let lastCall = 0;
+const minGapMs = Math.ceil(60000 / Math.max(1, OPENAI_RPM));
+
+// simple in-memory cache
+const aiCache = new Map();                                          // key -> {t, val}
+const CACHE_TTL_MS = Number(process.env.AI_CACHE_TTL_MS || 120000);
+const cacheKey = (q, l, t, h) =>
+  `${q}|${Math.round(l)}|${Math.round(t)}|${Math.round(h)}`;
+const getCache = (k) => {
+  const v = aiCache.get(k);
+  if (!v) return null;
+  if (Date.now() - v.t > CACHE_TTL_MS) {
+    aiCache.delete(k);
+    return null;
+  }
+  return v.val;
+};
+const setCache = (k, val) => aiCache.set(k, { t: Date.now(), val });
 
 // ===== Utils =====
 function cleanAIResponse(text = "") {
@@ -65,38 +87,76 @@ function getHumidityStatus(humidity) {
   return "อากาศแห้งมาก 🏜️";
 }
 
-// ===== AI Helpers (robust) =====
+// ===== OpenAI low-level (kept) =====
 async function askOpenAI(prompt) {
   if (!process.env.OPENAI_API_KEY) return "❌ ยังไม่ได้ตั้งค่า OPENAI_API_KEY";
-  // ลองใช้ Responses API ก่อน
   try {
     if (typeof openai.responses?.create === "function") {
       const resp = await openai.responses.create({
-        model: "gpt-4o-mini",
+        model: OPENAI_MODEL,
         input: prompt,
+        temperature: 0.2,
         store: false,
       });
       return resp.output_text ?? "ไม่มีข้อความตอบกลับ";
     }
     throw new Error("Responses API not available");
   } catch (e1) {
-    // ถ้าใช้ responses ไม่ได้ ให้ fallback ไป chat.completions (รองรับ lib รุ่นเก่า)
     try {
       if (typeof openai.chat?.completions?.create === "function") {
         const resp = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
+          model: OPENAI_MODEL,
+          temperature: 0.2,
           messages: [{ role: "user", content: prompt }],
         });
         return resp.choices?.[0]?.message?.content ?? "ไม่มีข้อความตอบกลับ";
       }
       throw e1;
     } catch (e2) {
-      // ส่งต่อ error ให้ caller จัดการ fallback ต่อ
       throw e2;
     }
   }
 }
 
+// ===== Rate-limit wrapper =====
+function parseRetryAfterMs(err) {
+  const h = err?.headers;
+  if (!h) return null;
+  const get = typeof h.get === "function" ? (k) => h.get(k) : (k) => h[k];
+  const raw = get("retry-after-ms") || get("retry-after");
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (s.endsWith("ms")) return Number(s.replace("ms", "")) || null;
+  const sec = Number(s);
+  return Number.isFinite(sec) ? sec * 1000 : null;
+}
+
+function safeAskOpenAI(prompt) {
+  return (chain = chain.then(async () => {
+    // spacing ตาม RPM
+    const now = Date.now();
+    const wait = Math.max(0, lastCall + minGapMs - now);
+    if (wait > 0) await delay(wait);
+
+    let attempt = 0;
+    for (;;) {
+      try {
+        const out = await askOpenAI(prompt);
+        lastCall = Date.now();
+        return out;
+      } catch (err) {
+        if (err?.status !== 429 || attempt >= OPENAI_MAX_RETRIES) throw err;
+        attempt++;
+        const backoff =
+          parseRetryAfterMs(err) ?? Math.min(30000, (2 ** attempt) * 1000 + Math.floor(Math.random() * 800));
+        console.warn(`[OpenAI] 429 -> retry in ${backoff}ms (attempt ${attempt})`);
+        await delay(backoff);
+      }
+    }
+  }));
+}
+
+// ===== High-level helper =====
 async function answerWithSensorAI(question, light, temp, humidity) {
   const prompt = `
 ข้อมูลเซ็นเซอร์:
@@ -106,28 +166,31 @@ async function answerWithSensorAI(question, light, temp, humidity) {
 คำถาม: "${question}"
 โปรดตอบเป็นภาษาไทยแบบสั้น กระชับ ชัดเจน
   `.trim();
-  return askOpenAI(prompt);
+
+  const key = cacheKey(question, light, temp, humidity);
+  const cached = getCache(key);
+  if (cached) return cached;
+
+  const out = await safeAskOpenAI(prompt);
+  setCache(key, out);
+  return out;
 }
 
+// ===== Express middlewares =====
+app.use(cors());
+app.use(express.json());
+
+let lastSensorData = null;
 
 // ===== LINE Reply =====
 async function replyToUser(replyToken, message) {
   try {
     const trimmedMessage =
       message.length > 1000 ? message.slice(0, 1000) + "\n...(ตัดข้อความ)" : message;
-    // @ts-ignore
     await axios.post(
       "https://api.line.me/v2/bot/message/reply",
-      {
-        replyToken,
-        messages: [{ type: "text", text: trimmedMessage }],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-      }
+      { replyToken, messages: [{ type: "text", text: trimmedMessage }] },
+      { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}`, "Content-Type": "application/json" } }
     );
   } catch (err) {
     console.error("❌ LINE reply error:", err?.response?.data || err?.message);
@@ -202,24 +265,21 @@ async function processMessageEvent(event) {
 
   await replyToUser(replyToken, "⏳ กำลังถาม AI...");
 
-  const aiText = await askOpenAI(normalizedText, light, temp, humidity);
-  if (!aiText || aiText.trim() === "") {
+  // ✅ ใช้ answerWithSensorAI (มีคิว/แคช)
+  const aiText = await answerWithSensorAI(normalizedText, light, temp, humidity);
+  const finalText = (aiText || "").trim();
+  if (!finalText) {
     await replyToUser(replyToken, "❌ คำตอบจาก AI ว่างเปล่า ไม่สามารถส่งข้อความได้");
     await deletePendingReply(created.id);
     return;
   }
 
-  const answer = `${normalizedText}?\n- คำตอบ จาก AI : ${aiText.trim()}`;
+  const answer = `${normalizedText}?\n- คำตอบ จาก AI : ${cleanAIResponse(finalText)}`;
 
   await axios.post(
     "https://api.line.me/v2/bot/message/push",
     { to: userId, messages: [{ type: "text", text: answer }] },
-    {
-      headers: {
-        Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    }
+    { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}`, "Content-Type": "application/json" } }
   );
 
   await deletePendingReply(created.id);
@@ -237,7 +297,7 @@ app.post("/sensor-data", (req, res) => {
 });
 
 // ===== Latest Sensor =====
-app.get("/latest", (req, res) => {
+app.get("/latest", (_req, res) => {
   if (lastSensorData) res.json(lastSensorData);
   else res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
 });
@@ -249,17 +309,20 @@ app.post("/ask-ai", async (req, res) => {
       return res.status(400).json({ error: "❌ missing question" });
     }
 
-    // 1) พยายามใช้ค่าจาก body ก่อน ถ้าไม่ครบค่อย fallback ไป lastSensorData
     let light, temp, humidity;
-    if ([bLight, bTemp, bHum].every(v => typeof v === "number" && !Number.isNaN(v))) {
-      light = bLight; temp = bTemp; humidity = bHum;
+    if ([bLight, bTemp, bHum].every((v) => typeof v === "number" && !Number.isNaN(v))) {
+      light = bLight;
+      temp = bTemp;
+      humidity = bHum;
     } else if (lastSensorData) {
       ({ light, temp, humidity } = lastSensorData);
     } else {
-      return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์ (ไม่พบทั้งใน body และ server)" });
+      return res
+        .status(400)
+        .json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์ (ไม่พบทั้งใน body และ server)" });
     }
 
-    // 2) เรียก AI ถ้าล้มเหลว ให้ตอบ fallback rule-based แทน
+    // ยิง AI (มีคิว/แคช) ถ้าพังจะ fallback
     try {
       const ai = await answerWithSensorAI(question, light, temp, humidity);
       return res.json({ answer: cleanAIResponse(ai), meta: { source: "openai" } });
@@ -279,48 +342,65 @@ app.post("/ask-ai", async (req, res) => {
   }
 });
 
-// ===== Auto report every 5 min =====
-setInterval(async () => {
-  try {
-    if (!lastSensorData) return;
-    if (!LINE_ACCESS_TOKEN) return;
+// ===== Auto report (gated) =====
+if (ENABLE_AUTO_REPORT) {
+  setInterval(async () => {
+    try {
+      if (!lastSensorData) return;
+      if (!LINE_ACCESS_TOKEN) return;
 
-    const { light, temp, humidity } = lastSensorData;
-    const now = dayjs().tz("Asia/Bangkok");
-    const buddhistYear = now.year() + 543;
+      const { light, temp, humidity } = lastSensorData;
+      const now = dayjs().tz("Asia/Bangkok");
+      const buddhistYear = now.year() + 543;
 
-    const thaiDays = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
-    const thaiMonths = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+      const thaiDays = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
+      const thaiMonths = [
+        "มกราคม",
+        "กุมภาพันธ์",
+        "มีนาคม",
+        "เมษายน",
+        "พฤษภาคม",
+        "มิถุนายน",
+        "กรกฎาคม",
+        "สิงหาคม",
+        "กันยายน",
+        "ตุลาคม",
+        "พฤศจิกายน",
+        "ธันวาคม",
+      ];
 
-    const thaiTime = `วัน${thaiDays[now.day()]} ที่ ${now.date()} ${thaiMonths[now.month()]} พ.ศ.${buddhistYear} เวลา ${now.format("HH:mm")} น.`;
+      const thaiTime = `วัน${thaiDays[now.day()]} ที่ ${now.date()} ${thaiMonths[now.month()]} พ.ศ.${buddhistYear} เวลา ${now.format("HH:mm")} น.`;
 
-    const aiAnswer = cleanAIResponse(
-      await answerWithSensorAI("วิเคราะห์สภาพอากาศขณะนี้", light, temp, humidity)
-    );
+      const aiAnswer = cleanAIResponse(
+        await answerWithSensorAI("วิเคราะห์สภาพอากาศขณะนี้", light, temp, humidity)
+      );
 
-    const message = `📡 รายงานอัตโนมัติ ทุก 5 นาที :
+      const message = `📡 รายงานอัตโนมัติ :
 🕒 เวลา : ${thaiTime}
 💡 ค่าแสง : ${light} lux (${getLightStatus(light)})
 🌡️ อุณหภูมิ : ${temp} °C (${getTempStatus(temp)})
 💧 ความชื้น : ${humidity} % (${getHumidityStatus(humidity)})
 🤖 AI : ${aiAnswer}`;
 
-    const users = await prisma.user.findMany();
-    for (const u of users) {
-      await axios.post(
-        "https://api.line.me/v2/bot/message/push",
-        { to: u.userId, messages: [{ type: "text", text: message }] },
-        { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}`, "Content-Type": "application/json" } }
-      );
+      const users = await prisma.user.findMany();
+      for (const u of users) {
+        await axios.post(
+          "https://api.line.me/v2/bot/message/push",
+          { to: u.userId, messages: [{ type: "text", text: message }] },
+          { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}`, "Content-Type": "application/json" } }
+        );
+      }
+      console.log(`✅ รายงานอัตโนมัติส่งแล้ว: ${thaiTime}`);
+    } catch (e) {
+      console.error("auto-report error:", e);
     }
-    console.log(`✅ รายงานอัตโนมัติส่งแล้ว: ${thaiTime}`);
-  } catch (e) {
-    console.error("auto-report error:", e);
-  }
-}, 5 * 60 * 1000);
+  }, Math.max(5 * 60 * 1000, minGapMs)); // อย่างน้อยต้องไม่ถี่กว่า minGapMs
+}
 
 // ===== Health & Root =====
-app.get("/healthz", (_req, res) => res.status(200).send("✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ "));
+app.get("/healthz", (_req, res) =>
+  res.status(200).send("✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ ")
+);
 
 // ===== Root route (ส่งครั้งเดียว)
 app.get("/", async (_req, res) => {
@@ -351,5 +431,17 @@ app.get("/", async (_req, res) => {
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT} (env: ${NODE_ENV})`);
 });
-process.on("SIGTERM", async () => { try { await prisma.$disconnect(); } finally { server.close(); } });
-process.on("SIGINT", async () => { try { await prisma.$disconnect(); } finally { server.close(); } });
+process.on("SIGTERM", async () => {
+  try {
+    await prisma.$disconnect();
+  } finally {
+    server.close();
+  }
+});
+process.on("SIGINT", async () => {
+  try {
+    await prisma.$disconnect();
+  } finally {
+    server.close();
+  }
+});
