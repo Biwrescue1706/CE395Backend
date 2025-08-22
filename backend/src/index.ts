@@ -4,7 +4,6 @@ dotenv.config();
 
 import express, { Request, Response } from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
 import axios from "axios";
 import dayjs from "dayjs";
 import utc from "dayjs/plugin/utc";
@@ -25,8 +24,9 @@ const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
 // OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ?? "" });
+
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json()); // ← ใช้ของ Express แทน body-parser
 
 // ===== In-memory sensor cache =====
 let lastSensorData: { light: number; temp: number; humidity: number } | null = null;
@@ -298,6 +298,7 @@ app.get("/", async (req: Request, res: Response) => {
   let html = `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`;
 
   try {
+    // เรียกข้อมูลล่าสุดจาก service ภายนอก (แก้ URL ให้ตรงกับของคุณ)
     const sensor = await axios.get("https://ce395backend-1.onrender.com/latest");
     const { light, temp, humidity } = sensor.data;
 
@@ -312,9 +313,15 @@ app.get("/", async (req: Request, res: Response) => {
       💧 ความชื้น: ${humidity} % (${humidityStatus})
     `;
   } catch {
+    // ถ้าเรียกภายนอกไม่ได้ ลองแสดงจาก cache ในหน่วยความจำถ้ามี
     if (lastSensorData) {
+      const { light, temp, humidity } = lastSensorData;
       html = `
         ✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
+        (แสดงจากข้อมูลล่าสุดในหน่วยความจำ) <br>
+        💡 ค่าแสง: ${light} lux (${getLightStatus(light)}) <br>
+        🌡️ อุณหภูมิ: ${temp} °C (${getTempStatus(temp)}) <br>
+        💧 ความชื้น: ${humidity} % (${getHumidityStatus(humidity)})
       `;
     }
   }
