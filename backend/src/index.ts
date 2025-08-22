@@ -20,8 +20,6 @@ const app = express();
 const prisma = new PrismaClient();
 
 const PORT = Number(process.env.PORT) || 10000;
-const HOST = process.env.HOST || "0.0.0.0";
-const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
@@ -292,22 +290,31 @@ setInterval(async () => {
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 
 // ===== Root route
-app.get("/", (_req: Request, res: Response) => {
+app.get("/", async (req: Request, res: Response) => {
+  try {
+    const sensor = await axios.get("https://ce395backend.onrender.com/latest");
+    const { light, temp, humidity } = sensor.data;
+    const lightStatus = getLightStatus(light);
+    const tempStatus = getTempStatus(temp);
+    const humidityStatus = getHumidityStatus(humidity);
+    res.send(
+      `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
+💡 ค่าแสง: ${light} lux ( ${lightStatus} ) <br>
+🌡 อุณหภูมิ: ${temp} °C ( ${tempStatus} ) <br>
+💧 ความชื้น: ${humidity} % ( ${humidityStatus} )`);
+
+  } catch {
+    res.send(`✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>`);
+  }
   if (!lastSensorData) {
     return res.send("✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ.");
   }
-  const { light, temp, humidity } = lastSensorData;
-  res.send(
-    `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
-💡 ค่าแสง: ${light} lux ( ${getLightStatus(light)} ) <br>
-🌡 อุณหภูมิ: ${temp} °C ( ${getTempStatus(temp)} ) <br>
-💧 ความชื้น: ${humidity} % ( ${getHumidityStatus(humidity)} )`
-  );
+
 });
 
 // ===== Start & graceful shutdown =====
-const server = app.listen(PORT, HOST, () => {
-  console.log(`🚀 Server running at http://${displayHost}:${PORT} (env: ${NODE_ENV})`);
+const server = app.listen(PORT, () => {
+  console.log(`🚀 Server running at http://localhost:${PORT} (env: ${NODE_ENV})`);
 });
 
 process.on("SIGTERM", async () => {
