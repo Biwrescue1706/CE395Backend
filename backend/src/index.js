@@ -3,12 +3,13 @@ require("dotenv").config();
 
 const express = require("express");
 const cors = require("cors");
-const axios = require("axios");
 const dayjs = require("dayjs");
 const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
 const { PrismaClient } = require("@prisma/client");
-const OpenAI = require("openai");
+
+const axios = require("axios").default;
+const OpenAI = require("openai").default;
 
 // ----- Init libs -----
 dayjs.extend(utc);
