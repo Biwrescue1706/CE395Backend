@@ -1,13 +1,11 @@
 // src/index.js
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
 const dayjs = require("dayjs");
 const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
 const { PrismaClient } = require("@prisma/client");
-
 const axios = require("axios").default;
 const OpenAI = require("openai").default;
 
@@ -26,10 +24,10 @@ const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY ?? "" });
 
 app.use(cors());
-app.use(express.json()); // body-parser ไม่จำเป็น
+app.use(express.json());
 
 // ===== In-memory sensor cache =====
-let lastSensorData = null; // { light, temp, humidity }
+let lastSensorData = null;
 
 // ===== Utils =====
 function cleanAIResponse(text) {
@@ -248,7 +246,7 @@ setInterval(async () => {
 }, 5 * 60 * 1000);
 
 // ===== Health & Root =====
-app.get("/healthz", (req, res) => res.status(200).send("ok"));
+app.get("/healthz", (req, res) => res.status(200).send("✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ <br>status:ok"));
 
 // ===== Root route (ส่งครั้งเดียว)
 app.get("/", async (req, res) => {
