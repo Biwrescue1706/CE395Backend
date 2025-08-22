@@ -21,15 +21,12 @@ const PORT = Number(process.env.PORT) || 10000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
-// OpenAI client
-// @ts-ignore
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY || "" });
 
 app.use(cors());
 app.use(express.json());
 
-// ===== In-memory sensor cache =====
-let lastSensorData = null; // { light, temp, humidity }
+let lastSensorData = null;
 
 // ===== Utils =====
 function cleanAIResponse(text = "") {
