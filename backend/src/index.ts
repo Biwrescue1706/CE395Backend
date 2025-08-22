@@ -2,7 +2,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import express, { Request, Response } from "express";
+import express, { Request, Response, RequestHandler } from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import axios from "axios";
@@ -19,16 +19,14 @@ dayjs.extend(timezone);
 const app = express();
 const prisma = new PrismaClient();
 
-const PORT = Number(process.env.PORT) || 3000;
-const HOST = "0.0.0.0";
+const PORT = Number(process.env.PORT) || 10000;
+const HOST = process.env.HOST || "0.0.0.0";
+const displayHost = HOST === "0.0.0.0" ? "localhost" : HOST;
 const NODE_ENV = process.env.NODE_ENV || "development";
-const IS_PROD = NODE_ENV === "production";
 const LINE_ACCESS_TOKEN = process.env.LINE_ACCESS_TOKEN || "";
 
-// OpenAI client (อย่าลืมตั้ง OPENAI_API_KEY ใน Render)
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// OpenAI client
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.use(cors());
 app.use(bodyParser.json());
@@ -38,8 +36,12 @@ let lastSensorData: { light: number; temp: number; humidity: number } | null = n
 
 // ===== Utils =====
 function cleanAIResponse(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/<[^>]+>/g, "").trim();
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<[^>]+>/g, "")
+    .trim();
 }
+
 function getLightStatus(light: number): string {
   if (light > 50000) return "แดดจ้า ☀️";
   if (light > 10000) return "กลางแจ้ง มีเมฆ หรือแดดอ่อน 🌤";
@@ -50,6 +52,7 @@ function getLightStatus(light: number): string {
   if (light > 10) return "ไฟสลัว 🌑";
   return "มืดมากๆ 🕳️";
 }
+
 function getTempStatus(temp: number): string {
   if (temp > 35) return "อุณหภูมิร้อนมาก ⚠️";
   if (temp >= 30) return "อุณหภูมิร้อน 🔥";
@@ -57,6 +60,7 @@ function getTempStatus(temp: number): string {
   if (temp >= 20) return "อุณหภูมิพอดี 🌤";
   return "อุณหูมิเย็น ❄️";
 }
+
 function getHumidityStatus(humidity: number): string {
   if (humidity > 85) return "ชื้นมาก อากาศอึดอัด 🌧️";
   if (humidity > 70) return "อากาศชื้น เหนียวตัว 💦";
@@ -77,11 +81,16 @@ async function askOpenAI(prompt: string): Promise<string> {
     input: prompt,
     store: false,
   });
-  // @ts-ignore  // SDK ใส่ helper field ให้
+  // @ts-ignore
   return resp.output_text ?? "ไม่มีข้อความตอบกลับ";
 }
 
-async function answerWithSensorAI(question: string, light: number, temp: number, humidity: number) {
+async function answerWithSensorAI(
+  question: string,
+  light: number,
+  temp: number,
+  humidity: number
+) {
   const prompt = `
 ข้อมูลเซ็นเซอร์:
 - ค่าแสง: ${light} lux
@@ -94,15 +103,27 @@ async function answerWithSensorAI(question: string, light: number, temp: number,
 }
 
 // ===== LINE Reply =====
-async function replyToUserAndDelete(id: number, replyToken: string, message: string) {
+async function replyToUserAndDelete(
+  id: number,
+  replyToken: string,
+  message: string
+) {
   try {
-    const text = message.length > 4000 ? message.slice(0, 4000) + "\n...(ตัดข้อความ)" : message;
+    const text =
+      message.length > 4000
+        ? message.slice(0, 4000) + "\n...(ตัดข้อความ)"
+        : message;
     if (!LINE_ACCESS_TOKEN) throw new Error("LINE_ACCESS_TOKEN is missing");
 
     await axios.post(
       "https://api.line.me/v2/bot/message/reply",
       { replyToken, messages: [{ type: "text", text }] },
-      { headers: { Authorization: `Bearer ${LINE_ACCESS_TOKEN}`, "Content-Type": "application/json" } }
+      {
+        headers: {
+          Authorization: `Bearer ${LINE_ACCESS_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+      }
     );
     await prisma.pendingReply.delete({ where: { id } });
     console.log("✅ ส่งข้อความกลับ LINE แล้ว");
@@ -112,14 +133,14 @@ async function replyToUserAndDelete(id: number, replyToken: string, message: str
 }
 
 // ===== Webhook =====
-app.post("/webhook", async (req: Request, res: Response) => {
-  const events = req.body?.events || [];
+const webhook: RequestHandler = async (req, res) => {
+  const events = (req.body?.events as any[]) || [];
 
   for (const event of events) {
     const userId = event?.source?.userId as string | undefined;
     const replyToken = event?.replyToken as string | undefined;
     const messageType = event?.message?.type as string | undefined;
-    const text = (event?.message?.text || "").trim();
+    const text = ((event?.message?.text as string) || "").trim();
 
     if (!userId || !replyToken) continue;
 
@@ -151,7 +172,6 @@ app.post("/webhook", async (req: Request, res: Response) => {
 💧 ความชื้น: ${humidity} % (${humidityStatus})`;
 
     if (messageType === "text") {
-      // ตอบด้วย OpenAI + context sensor
       const ai = await answerWithSensorAI(text, light, temp, humidity);
       replyText += `\n🤖 AI: ${cleanAIResponse(ai)}`;
     }
@@ -160,29 +180,41 @@ app.post("/webhook", async (req: Request, res: Response) => {
   }
 
   res.sendStatus(200);
-});
+};
+app.post("/webhook", webhook);
 
 // ===== Sensor Data =====
 app.post("/sensor-data", (req: Request, res: Response) => {
   const { light, temp, humidity } = req.body;
   if ([light, temp, humidity].every((v) => v !== undefined)) {
-    lastSensorData = { light: Number(light), temp: Number(temp), humidity: Number(humidity) };
-    return res.json({ message: "✅ รับข้อมูลแล้ว" });
+    lastSensorData = {
+      light: Number(light),
+      temp: Number(temp),
+      humidity: Number(humidity),
+    };
+    res.json({ message: "✅ รับข้อมูลแล้ว" });
+    return;
   }
   res.status(400).json({ message: "❌ ข้อมูลไม่ครบ" });
 });
 
 // ===== Latest Sensor =====
 app.get("/latest", (_req: Request, res: Response) => {
-  if (!lastSensorData) return res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
+  if (!lastSensorData) {
+    res.status(404).json({ message: "❌ ไม่มีข้อมูลเซ็นเซอร์" });
+    return;
+  }
   res.json(lastSensorData);
 });
 
-// ===== Generic OpenAI endpoint (ไม่ผูก sensor) =====
+// ===== Generic OpenAI endpoint =====
 app.post("/ask", async (req: Request, res: Response) => {
   try {
     const { prompt } = req.body;
-    if (!prompt) return res.status(400).json({ error: "missing prompt" });
+    if (!prompt) {
+      res.status(400).json({ error: "missing prompt" });
+      return;
+    }
     const answer = await askOpenAI(prompt);
     res.json({ answer });
   } catch (err: any) {
@@ -194,9 +226,15 @@ app.post("/ask", async (req: Request, res: Response) => {
 // ===== Ask AI with sensor context =====
 app.post("/ask-ai", async (req: Request, res: Response) => {
   try {
-    if (!lastSensorData) return res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
+    if (!lastSensorData) {
+      res.status(400).json({ error: "❌ ยังไม่มีข้อมูลเซ็นเซอร์" });
+      return;
+    }
     const { question } = req.body;
-    if (!question) return res.status(400).json({ error: "❌ missing question" });
+    if (!question) {
+      res.status(400).json({ error: "❌ missing question" });
+      return;
+    }
 
     const { light, temp, humidity } = lastSensorData;
     const answer = await answerWithSensorAI(question, light, temp, humidity);
@@ -207,11 +245,11 @@ app.post("/ask-ai", async (req: Request, res: Response) => {
   }
 });
 
-// ===== Auto report every 5 min (guarded) =====
+// ===== Auto report every 5 min =====
 setInterval(async () => {
   try {
     if (!lastSensorData) return;
-    if (!LINE_ACCESS_TOKEN) return; // ไม่มี token ก็ไม่ต้อง push
+    if (!LINE_ACCESS_TOKEN) return;
 
     const { light, temp, humidity } = lastSensorData;
     const now = dayjs().tz("Asia/Bangkok");
@@ -220,7 +258,7 @@ setInterval(async () => {
     const thaiDays = ["อาทิตย์", "จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์"];
     const thaiMonths = [
       "มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
-      "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"
+      "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม",
     ];
 
     const thaiTime = `วัน${thaiDays[now.day()]} ที่ ${now.date()} ${thaiMonths[now.month()]} พ.ศ.${buddhistYear} เวลา ${now.format("HH:mm")} น.`;
@@ -253,11 +291,14 @@ setInterval(async () => {
 // ===== Health & Root =====
 app.get("/healthz", (_req, res) => res.status(200).send("ok"));
 
+// ===== Root route
 app.get("/", (_req: Request, res: Response) => {
-  if (!lastSensorData) return res.status(200).send("✅ Hello World!");
+  if (!lastSensorData) {
+    return res.send("✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ.");
+  }
   const { light, temp, humidity } = lastSensorData;
   res.send(
-    `✅ Hello World!<br>
+    `✅ สวัสดีครับ ตอนนี้ระบบ backend กำลังทำงานอยู่ครับ. <br>
 💡 ค่าแสง: ${light} lux ( ${getLightStatus(light)} ) <br>
 🌡 อุณหภูมิ: ${temp} °C ( ${getTempStatus(temp)} ) <br>
 💧 ความชื้น: ${humidity} % ( ${getHumidityStatus(humidity)} )`
@@ -266,7 +307,7 @@ app.get("/", (_req: Request, res: Response) => {
 
 // ===== Start & graceful shutdown =====
 const server = app.listen(PORT, HOST, () => {
-  console.log(`🚀 Server running at http://${HOST}:${PORT} (env: ${NODE_ENV})`);
+  console.log(`🚀 Server running at http://${displayHost}:${PORT} (env: ${NODE_ENV})`);
 });
 
 process.on("SIGTERM", async () => {
