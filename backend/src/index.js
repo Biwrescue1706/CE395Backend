@@ -272,10 +272,10 @@ app.post("/ask-ai", async (req, res) => {
 });
 
 // ===== Health & Root =====
-app.get("/healthz", (req, res) => res.status(200).send("✅ Backend กำลังทำงาน"));
+app.get("/healthz", (req, res) => res.status(200).send("✅ ตอนนี้ ระบบBackend กำลังทำงานอยู่ครับผม"));
 
 app.get("/", async (req, res) => {
-  let html = `✅ Backend กำลังทำงาน <br>`;
+  let html = `✅ ตอนนี้ ระบบBackend กำลังทำงานอยู่ครับผม <br>`;
   try {
     const sensor = await axios.get("https://ce395backend-1.onrender.com/latest");
     const { light, temp, humidity } = sensor.data;
